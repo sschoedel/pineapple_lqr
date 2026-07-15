@@ -1,0 +1,45 @@
+# Config for deploy_lqr.py (Pineapple V3 LQR hardware runner).
+# Everything not listed here uses the suite-verified defaults baked into
+# the controller (gains, governor envelope, slew limits).
+
+# DDS transport (matches the RL deploy stack).
+dds_domain_id: 1
+net_interface: "eth0"
+
+# Low-level loop period (s) and LQR decimation (1 = LQR at 500 Hz,
+# 5 = 100 Hz; both suite-verified — start at 1).
+dt: 0.005
+control_decimation: 1
+
+# Metadata joint order (JOINT_NAMES: L_hip, L_thigh, L_calf, L_wheel,
+# R_hip, R_thigh, R_calf, R_wheel) -> SDK motor index. Identity when the
+# motor order already matches, same convention as mjlab_deploy.yaml.
+joint_to_motor_idx: [0, 1, 2, 3, 4, 5, 6, 7]
+
+# Stand/sit ramps (deploy-stack values).
+stand_seconds: 3.0
+stand_kp: 40.0
+stand_kd: 1.0
+sit_angles: [0.093, 1.49, -3.14, 0.0, 0.093, 1.49, -3.14, 0.0]
+
+# Safety.
+damp_kd: 1.0
+trip_tilt: 0.5   # rad — balance mode auto-drops to damp beyond this
+
+# Conservative first-hardware teleop limits (suite verified far beyond
+# these; raise after shakedown). NOTE: yaw is additionally governed to
+# min(0.6, 0.3/|v|) rad/s while translating, in the controller itself.
+max_lin_vel: 0.5
+max_ang_vel: 0.5
+
+# Loop-delay compensation in 5 ms physics steps. Leave at 0 until the real
+# sensor->torque round trip is measured; see README "Known limitations" —
+# if the measured latency is >= 10 ms, keep yaw commands small.
+delay_comp_steps: 0
+
+# Operator deadman (laptop heartbeat link). The runner damps the robot if
+# console heartbeats stop for deadman_timeout seconds. Arms on the first
+# heartbeat — run deploy_lqr_console.py ON THE LAPTOP.
+deadman_timeout: 0.5
+udp_port: 43613
+udp_bind: "0.0.0.0"
