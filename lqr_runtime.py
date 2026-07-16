@@ -152,10 +152,47 @@ class TableController:
         self.stance = t["stance"]
         self.dt_design = float(t["dt"])
         self._own_vel_col = t["own_vel_col"].astype(int)
+        # Live tuning (GUI sliders; persisted in tuning.yaml). Defaults
+        # reproduce the sim-verified controller exactly.
+        #   wheel_kd   — emitted board damping on the wheels [Nm/(rad/s)]
+        #   wheel_gain — scale on the wheel rows of K and Ki (chatter knob)
+        #   vx_gain    — scale on the forward-velocity feedback column
+        #   vi_gain    — scale on the velocity-integrator authority
+        self.tune = {
+            "wheel_kd": float(t["kd_emit"][3]),
+            "wheel_gain": 1.0,
+            "vx_gain": 1.0,
+            "vi_gain": 1.0,
+        }
+        self._K_eff = self.K.copy()
+        self._Ki_eff = self.Ki.copy()
+        self._kd_emit_eff = t["kd_emit"].astype(float).copy()
+        self._apply_tuning()
         self._v_smooth = 0.0
         self._w_smooth = 0.0
         self._integ = np.zeros(self.Ki.shape[1])
         self._vx_hat = 0.0
+
+    def set_tuning(self, **kw):
+        for k, v in kw.items():
+            assert k in self.tune, k
+            self.tune[k] = float(v)
+        self._apply_tuning()
+
+    def _apply_tuning(self):
+        tn = self.tune
+        K = self.K.copy()
+        Ki = self.Ki.copy()
+        K[[3, 7], :] *= tn["wheel_gain"]
+        Ki[[3, 7], :] *= tn["wheel_gain"]
+        dx = self._idx["dx"]
+        K[:, dx] *= tn["vx_gain"]
+        Ki[:, 0] *= tn["vi_gain"]
+        self._K_eff = K
+        self._Ki_eff = Ki
+        kd = self.t["kd_emit"].astype(float).copy()
+        kd[3] = kd[7] = tn["wheel_kd"]
+        self._kd_emit_eff = kd
 
     def reset(self):
         self._v_smooth = 0.0
@@ -228,7 +265,7 @@ class TableController:
         self.last_x = x
         x_ref = self.reference(v_cmd, w_cmd)
         err = x - x_ref
-        u = self.u_eq - self.K @ err - self.Ki @ self._integ
+        u = self.u_eq - self._K_eff @ err - self._Ki_eff @ self._integ
 
         tilt = max(abs(x[self._idx["roll"]]), abs(x[self._idx["pitch"]]))
         if tilt > float(t["integ_reset_tilt"]):
@@ -239,7 +276,7 @@ class TableController:
             np.clip(self._integ, -clamp, clamp, out=self._integ)
 
         kp = t["board_kp"].astype(float)
-        kd = t["kd_emit"].astype(float)
+        kd = self._kd_emit_eff
         q_cmd = self.stance.copy()
         dq_cmd = np.zeros(8)
         for j in range(8):
