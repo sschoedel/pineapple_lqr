@@ -314,6 +314,8 @@ class RobotRuntime:
             self.mode = "damp"
             self.tripped = True
             self.trip_reason = reason
+        self.v_cmd = 0.0
+        self.w_cmd = 0.0
         self._last_cmd = self.damp_cmd()
 
     def damp_cmd(self) -> MitCommand:
