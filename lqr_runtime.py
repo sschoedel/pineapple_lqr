@@ -163,6 +163,10 @@ class TableController:
             "wheel_gain": 1.0,
             "vx_gain": 1.0,
             "vi_gain": 1.0,
+            # emitted hip kp above the design value: pure added stance
+            # stiffness at the board rate (fights hip stiction creep /
+            # track-width wander). 0 = sim-verified default.
+            "hip_kp_extra": 0.0,
         }
         self._K_eff = self.K.copy()
         self._Ki_eff = self.Ki.copy()
@@ -193,6 +197,10 @@ class TableController:
         kd = self.t["kd_emit"].astype(float).copy()
         kd[3] = kd[7] = tn["wheel_kd"]
         self._kd_emit_eff = kd
+        kp = self.t["board_kp"].astype(float).copy()
+        kp[0] += tn["hip_kp_extra"]
+        kp[4] += tn["hip_kp_extra"]
+        self._kp_emit_eff = kp
 
     def reset(self):
         self._v_smooth = 0.0
@@ -275,7 +283,7 @@ class TableController:
             clamp = t["integ_clamp"]
             np.clip(self._integ, -clamp, clamp, out=self._integ)
 
-        kp = t["board_kp"].astype(float)
+        kp = self._kp_emit_eff
         kd = self._kd_emit_eff
         q_cmd = self.stance.copy()
         dq_cmd = np.zeros(8)
@@ -283,7 +291,7 @@ class TableController:
             vc = self._own_vel_col[j]
             if vc >= 0:
                 dq_cmd[j] = x_ref[vc]
-        tau = u - kp * (q_cmd - snap.q) - t["kd_design"] * (dq_cmd - snap.dq)
+        tau = u - t["board_kp"] * (q_cmd - snap.q) - t["kd_design"] * (dq_cmd - snap.dq)
         # last-resort sanity clip at the motor effort limits
         lim = t["effort_limit"]
         tau = np.clip(tau, -lim, lim)
