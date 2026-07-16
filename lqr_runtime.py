@@ -204,6 +204,7 @@ class TableController:
         x[self._idx["dz"]] = v3[2]
         pos_meas = np.concatenate([[roll, pitch, 0.0], snap.q - self.stance])
         x[self._idx["z"]] = float(t["odo_M3"][2] @ pos_meas)
+        self.last_x = x  # telemetry (GUI) — updated on every estimate
         return x
 
     # -- control tick ----------------------------------------------------------
@@ -352,7 +353,7 @@ class RobotRuntime:
         out = {"mode": self.mode, "v_cmd": self.v_cmd, "w_cmd": self.w_cmd,
                "tripped": self.tripped, "reason": self.trip_reason}
         x = getattr(self.ctrl, "last_x", None)
-        if x is not None and self.mode == "balance":
+        if x is not None:
             idx = self.ctrl._idx
             out.update(
                 roll=float(x[idx["roll"]]), pitch=float(x[idx["pitch"]]),
