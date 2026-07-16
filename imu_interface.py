@@ -217,6 +217,17 @@ class XsensMtiImu:
             raise RuntimeError("no Xsens/USB-serial device found")
         self.ser = serial.Serial(port, baud, timeout=0.02)
         self.port = port
+        # FTDI adapters buffer the stream into large bursts by default
+        # (measured ~78 ms clumps on the Pi with the Xsens USB converter,
+        # which quantized the orientation into visible jumps). Low-latency
+        # mode sets the chip flush timer to 1 ms. A udev rule on the Pi
+        # (99-xsens-latency.rules) does the same at plug time; this is the
+        # in-process fallback and needs permissions (the GUI runs as root).
+        try:
+            self.ser.set_low_latency_mode(True)
+        except Exception as e:
+            print(f"xsens: could not set low-latency mode ({e}) — "
+                  "install the udev rule (see README)")
         self._parser = XbusParser()
         self._lock = threading.Lock()
         self._quat = None
