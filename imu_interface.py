@@ -215,7 +215,7 @@ class XsensMtiImu:
         port = port or find_port()
         if port is None:
             raise RuntimeError("no Xsens/USB-serial device found")
-        self.ser = serial.Serial(port, baud, timeout=0.05)
+        self.ser = serial.Serial(port, baud, timeout=0.02)
         self.port = port
         self._parser = XbusParser()
         self._lock = threading.Lock()
@@ -233,14 +233,22 @@ class XsensMtiImu:
         self._thread.start()
 
     def _configure(self):
-        """Best-effort output configuration (quat@100, gyro/accel@200)."""
-        def send(mid, payload=b""):
-            self.ser.write(xbus_frame(mid, payload))
-            time.sleep(0.05)
+        """Output configuration (quat@100, gyro/accel@200) with ack checks.
+        Failure is non-fatal: the device keeps its stored configuration and
+        we report what happened (a pre-configured 100 Hz stream is fine)."""
 
-        send(MID_GOTO_CONFIG)
-        time.sleep(0.2)
-        self.ser.reset_input_buffer()
+        def send_wait_ack(mid, payload=b"", ack_mid=None, wait=0.4):
+            self.ser.write(xbus_frame(mid, payload))
+            parser = XbusParser()
+            deadline = time.monotonic() + wait
+            while time.monotonic() < deadline:
+                data = self.ser.read(self.ser.in_waiting or 1)
+                for got_mid, _pl in parser.feed(data):
+                    if ack_mid is not None and got_mid == ack_mid:
+                        return True
+            return ack_mid is None
+
+        ok_cfg = send_wait_ack(MID_GOTO_CONFIG, ack_mid=MID_GOTO_CONFIG_ACK)
         cfg = b"".join(
             struct.pack(">HH", xdi, rate)
             for xdi, rate in (
@@ -251,8 +259,13 @@ class XsensMtiImu:
                 (XDI_ACCELERATION, 200),
             )
         )
-        send(MID_SET_OUTPUT_CFG, cfg)
-        send(MID_GOTO_MEASUREMENT)
+        ok_out = send_wait_ack(MID_SET_OUTPUT_CFG, cfg,
+                               ack_mid=MID_SET_OUTPUT_CFG + 1)
+        send_wait_ack(MID_GOTO_MEASUREMENT, ack_mid=MID_GOTO_MEASUREMENT + 1)
+        self.configured = bool(ok_cfg and ok_out)
+        if not self.configured:
+            print("xsens: output config not acknowledged — using the "
+                  "device's stored configuration")
         self.ser.reset_input_buffer()
 
     # NED -> z-up: rotate the world side 180 deg about x (N,E,D)->(N,W,U).
@@ -261,7 +274,13 @@ class XsensMtiImu:
     def _reader(self):
         while self._running:
             try:
-                data = self.ser.read(512)
+                # block until at least one byte (short timeout), then drain
+                # everything pending — per-packet latency ~1 ms instead of
+                # the read(512)-or-timeout batching that quantized samples
+                # into ~50 ms steps
+                data = self.ser.read(1)
+                if data and self.ser.in_waiting:
+                    data += self.ser.read(self.ser.in_waiting)
             except (OSError, serial.SerialException):
                 time.sleep(0.1)
                 continue
