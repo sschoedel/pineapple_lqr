@@ -97,6 +97,8 @@ class RuntimeConfig:
     deadman_timeout: float = 0.5
     udp_port: int = 43613
     udp_bind: str = "0.0.0.0"
+    # Motor calibration (signs/offsets) produced by calibrate.py.
+    calibration_file: str = "config/calibration.yaml"
     max_lin_vel: float = 1.0  # conservative first-hardware defaults
     max_ang_vel: float = 1.0
     delay_comp_steps: int = 0  # set after calibrating the real loop latency
@@ -213,6 +215,24 @@ class LqrRuntime:
         return float(np.cos(yaw) * a_world[0] + np.sin(yaw) * a_world[1])
 
     # -- main tick (call at cfg.dt from the low-level loop) -----------------
+
+    def telemetry(self) -> dict:
+        """Estimator/controller state for the GUI (sim-frame units)."""
+        out = {"mode": self.mode, "v_cmd": self.v_cmd, "w_cmd": self.w_cmd}
+        x = getattr(self.ctrl, "last_x", None)
+        if x is not None and self.mode == "balance":
+            idx = self.ctrl._idx
+            out.update(
+                roll=float(x[idx["roll"]]),
+                pitch=float(x[idx["pitch"]]),
+                vx=float(x[idx["dx"]]),
+                dyaw=float(x[idx["dyaw"]]),
+                z=float(x[idx["z"]]),
+                wheel_l=float(x[idx["dwheel_l"]]),
+                wheel_r=float(x[idx["dwheel_r"]]),
+                integ=[float(v) for v in self.ctrl._integ],
+            )
+        return out
 
     def tick(self, snap: SensorSnapshot) -> MitCommand:
         self._mode_t += self.cfg.dt
@@ -335,6 +355,7 @@ class OperatorLink:
                 "v": rt.v_cmd,
                 "w": rt.w_cmd,
                 "hb": msg.get("hb"),
+                "telemetry": rt.telemetry(),
             }
             try:
                 self.sock.sendto(self._json.dumps(status).encode(), addr)
@@ -357,11 +378,19 @@ def main(config_path: str) -> None:
     from unitree_sdk2py.idl.unitree_go.msg.dds_ import LowCmd_, LowState_
     from unitree_sdk2py.utils.crc import CRC
 
+    from calibrate import load_calibration
+    from lqr.calibration import apply_calibration, command_to_motor_frame
+
     with open(config_path) as f:
         raw = yaml.safe_load(f) or {}
     cfg = RuntimeConfig.from_yaml(config_path)
     runtime = LqrRuntime(cfg)
     m2j = np.asarray(cfg.joint_to_motor_idx)
+    cal_signs, cal_offsets = load_calibration(cfg.calibration_file)
+    print(f"calibration: signs={cal_signs.tolist()}")
+    print(f"             offsets={np.round(cal_offsets, 4).tolist()}")
+    if np.all(cal_offsets == 0.0):
+        print("!! offsets are all zero — run calibrate.py before trusting stance")
 
     ChannelFactoryInitialize(raw.get("dds_domain_id", 1), raw.get("net_interface", "eth0"))
 
@@ -375,8 +404,10 @@ def main(config_path: str) -> None:
     latest: dict = {"snap": None, "stamp": 0.0}
 
     def on_lowstate(msg: LowState_):
-        q = np.array([msg.motor_state[m2j[j]].q for j in range(8)])
-        dq = np.array([msg.motor_state[m2j[j]].dq for j in range(8)])
+        q_m = np.array([msg.motor_state[m2j[j]].q for j in range(8)])
+        dq_m = np.array([msg.motor_state[m2j[j]].dq for j in range(8)])
+        tau_m = np.array([msg.motor_state[m2j[j]].tau_est for j in range(8)])
+        q, dq, _ = apply_calibration(q_m, dq_m, tau_m, cal_signs, cal_offsets)
         snap = SensorSnapshot(
             q=q, dq=dq,
             quat=np.array(msg.imu_state.quaternion, dtype=float),
@@ -397,6 +428,7 @@ def main(config_path: str) -> None:
     last_banner = {"t": 0.0}
 
     def write_cmd(cmd) -> None:
+        cmd = command_to_motor_frame(cmd, cal_signs, cal_offsets)
         for j in range(8):
             mc = low_cmd.motor_cmd[m2j[j]]
             mc.q = float(cmd.q[j])

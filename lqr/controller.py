@@ -385,6 +385,7 @@ class LqrController:
         accel_x: float = 0.0,
     ) -> MitCommand:
         x = self.estimated_state(qpos, qvel, accel_x, dt)
+        self.last_x = x  # telemetry (GUI / logging)
         # Smith-predictor-style delay compensation: the measurement is
         # delay_comp_steps old by the time our command acts, so propagate
         # the estimate forward with the linear model and the torque deltas

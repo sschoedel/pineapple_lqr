@@ -103,6 +103,46 @@ Videos of five key runs: `videos/*.mp4`.
 4. The armless XML ships without a floor or actuators; this repo adds a
    plane (friction 1.0) and direct torque actuators at model build.
 
+## Motor calibration (before first stand)
+
+Encoder zeros and rotation directions must match the sim joint frames.
+With the robot **hoisted** (wheels free, legs able to swing):
+
+```bash
+uv run python calibrate.py config/deploy_lqr.yaml direction  # once per robot
+uv run python calibrate.py config/deploy_lqr.yaml range      # after any re-zero
+```
+
+- **direction**: pulses each motor +tau then −tau (differential, so
+  gravity on the hanging leg cancels) and asks you to confirm which way
+  the joint moved against the sim convention (prompts describe it; open
+  the MJCF in a viewer if unsure). Writes `signs`.
+- **range**: slow position-servo sweeps to both mechanical stops per leg
+  joint — a stop is declared when tracking error grows while the joint is
+  stationary (contact torque bounded ≈ 2 Nm), then backs off. Offsets are
+  set by aligning measured range midpoints with the XML ranges; the
+  per-joint width error is reported as a sanity check (large mismatch =
+  wrong sign, obstruction, or CAD/real stop disagreement). Wheels are
+  continuous — no zero needed (the controller only uses wheel velocity).
+- Results land in `config/calibration.yaml`; `deploy_lqr.py` loads it and
+  converts all sensing into sim frame and all commands into motor frame
+  (and warns loudly at startup if offsets are all zero).
+- The whole procedure is validated in sim with injected sign flips and
+  offsets (`tests/test_calibration.py`) — recovered to < 0.06 rad.
+
+## Viser command center (laptop GUI)
+
+```bash
+uv run python deploy_lqr_gui.py <pi-address>   # opens http://localhost:8080
+```
+
+Buttons for E-STOP (damp) / stand / balance / sit, v–w sliders with
+send/zero, live state-estimator telemetry (tilt, vx, yaw rate, height,
+wheel speeds, integrators), and link/trip status banners. The GUI **is**
+the operator deadman heartbeat: closing it (or losing wifi) damps the
+robot within 0.5 s. The plain-text `deploy_lqr_console.py` speaks the
+same protocol if you prefer a terminal.
+
 ## Hardware deployment notes
 
 - Command path: identical to `pineapple_rl_deploy` — 500 Hz `LowCmd_` DDS
