@@ -137,6 +137,60 @@ class Calibration:
         )
 
 
+class SpikeFilter:
+    """Single-sample glitch rejector for joint feedback.
+
+    A real joint cannot move faster than the motor velocity limits, so a
+    position step exceeding MAX_VEL * dt (with margin) in one tick is a
+    corrupted/glitched sample — hold the previous value for that tick
+    instead of feeding the jump to the controller (a 0.3 rad phantom step
+    through kp=40 + LQR gains is a multi-Nm twitch and a balance upset).
+    Velocity samples are clamped the same way. Consecutive rejections pass
+    through after MAX_CONSEC (a genuine fast motion, not a glitch).
+    """
+
+    # per-tick step limits, per joint class: legs move slowly while
+    # balancing (25 rad/s bound is already generous); wheels legitimately
+    # reach ~25 rad/s so their bound is looser.
+    LEG_MAX_VEL = 25.0  # rad/s
+    WHEEL_MAX_VEL = 45.0
+    MAX_DVEL = np.array([40.0, 40.0, 40.0, 80.0] * 2)  # rad/s per tick
+    MAX_CONSEC = 3
+
+    def __init__(self, dt: float):
+        self.dt = dt
+        self._step_lim = np.array(
+            [self.LEG_MAX_VEL, self.LEG_MAX_VEL, self.LEG_MAX_VEL,
+             self.WHEEL_MAX_VEL] * 2) * dt
+        self._q = None
+        self._dq = None
+        self._consec = np.zeros(8, dtype=int)
+        self.reject_count = 0
+        self.last_reject: int | None = None  # joint index
+
+    def apply(self, q: np.ndarray, dq: np.ndarray):
+        if self._q is None:
+            self._q = q.copy()
+            self._dq = dq.copy()
+            return q, dq
+        q = q.copy()
+        dq = dq.copy()
+        for j in range(8):
+            bad = (abs(q[j] - self._q[j]) > self._step_lim[j]
+                   or abs(dq[j] - self._dq[j]) > self.MAX_DVEL[j])
+            if bad and self._consec[j] < self.MAX_CONSEC:
+                self._consec[j] += 1
+                self.reject_count += 1
+                self.last_reject = j
+                q[j] = self._q[j]
+                dq[j] = self._dq[j]
+            else:
+                self._consec[j] = 0
+        self._q = q.copy()
+        self._dq = dq.copy()
+        return q, dq
+
+
 class TableController:
     """Mirror of pineapple_lqr's LqrController, driven by lqr_tables.npz."""
 
