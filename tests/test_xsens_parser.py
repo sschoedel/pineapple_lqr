@@ -88,3 +88,26 @@ def test_mount_rotation_math():
     qb = xi._quat_mul(q, xi._quat_conj(m))
     # base-frame quat should encode the -90 yaw of base relative to sensor
     assert abs(np.linalg.norm(qb) - 1) < 1e-9
+
+
+def test_double_precision_and_flags():
+    q = (0.7071, 0.7071, 0.0, 0.0)
+    body = struct.pack(">HB4d", xi.XDI_QUATERNION | 0x3, 32, *q)
+    fields = xi.parse_mtdata2(body)
+    assert np.allclose(fields["quat"], q, atol=1e-9)
+    assert fields["coord"] == 0
+
+
+def test_fixed_point_1220():
+    vals = (0.5, -1.25, 2.0)
+    raw = struct.pack(">HB3i", xi.XDI_RATE_OF_TURN | 0x1, 12,
+                      *(int(v * (1 << 20)) for v in vals))
+    fields = xi.parse_mtdata2(raw)
+    assert np.allclose(fields["gyro"], vals, atol=1e-5)
+
+
+def test_ned_coordinate_flag_reported():
+    q = (1.0, 0.0, 0.0, 0.0)
+    body = struct.pack(">HB4f", xi.XDI_QUATERNION | 0x4, 16, *q)  # NED flag
+    fields = xi.parse_mtdata2(body)
+    assert fields["coord"] == 1

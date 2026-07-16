@@ -131,8 +131,43 @@ class XbusParser:
         return out
 
 
+def _decode_floats(chunk: bytes, count: int, precision: int):
+    """Decode `count` values per the data-id precision flag (bits 0-1):
+    0 = float32, 1 = fixed 12.20, 2 = fixed 16.32, 3 = float64."""
+    try:
+        if precision == 0:
+            need = 4 * count
+            return np.array(struct.unpack(f">{count}f", chunk[:need])) \
+                if len(chunk) >= need else None
+        if precision == 3:
+            need = 8 * count
+            return np.array(struct.unpack(f">{count}d", chunk[:need])) \
+                if len(chunk) >= need else None
+        if precision == 1:  # FP12.20: int32 / 2^20
+            need = 4 * count
+            if len(chunk) < need:
+                return None
+            raw = struct.unpack(f">{count}i", chunk[:need])
+            return np.array(raw) / float(1 << 20)
+        if precision == 2:  # FP16.32: 32-bit fraction + 16-bit integer
+            need = 6 * count
+            if len(chunk) < need:
+                return None
+            vals = []
+            for k in range(count):
+                frac, integ = struct.unpack(
+                    ">Ih", chunk[6 * k:6 * k + 6])
+                vals.append(integ + frac / float(1 << 32))
+            return np.array(vals)
+    except struct.error:
+        return None
+    return None
+
+
 def parse_mtdata2(payload: bytes) -> dict:
-    """Extract quaternion / gyro / accel (float32 BE) from an MTData2 body."""
+    """Extract quaternion / gyro / accel from an MTData2 body, honouring
+    the precision flag (bits 0-1) and reporting the coordinate-system flag
+    (bits 2-3: 0=ENU, 1=NED, 2=NWU) of the quaternion."""
     out = {}
     i = 0
     n = len(payload)
@@ -141,16 +176,21 @@ def parse_mtdata2(payload: bytes) -> dict:
         dlen = payload[i + 2]
         chunk = payload[i + 3:i + 3 + dlen]
         i += 3 + dlen
-        base_id = data_id & 0xFFF0  # low nibble = precision/format flags
-        try:
-            if base_id == XDI_QUATERNION and dlen >= 16:
-                out["quat"] = np.array(struct.unpack(">4f", chunk[:16]))
-            elif base_id == XDI_RATE_OF_TURN and dlen >= 12:
-                out["gyro"] = np.array(struct.unpack(">3f", chunk[:12]))
-            elif base_id == XDI_ACCELERATION and dlen >= 12:
-                out["accel"] = np.array(struct.unpack(">3f", chunk[:12]))
-        except struct.error:
-            pass
+        base_id = data_id & 0xFFF0
+        precision = data_id & 0x3
+        if base_id == XDI_QUATERNION:
+            v = _decode_floats(chunk, 4, precision)
+            if v is not None:
+                out["quat"] = v
+                out["coord"] = (data_id >> 2) & 0x3
+        elif base_id == XDI_RATE_OF_TURN:
+            v = _decode_floats(chunk, 3, precision)
+            if v is not None:
+                out["gyro"] = v
+        elif base_id == XDI_ACCELERATION:
+            v = _decode_floats(chunk, 3, precision)
+            if v is not None:
+                out["accel"] = v
     return out
 
 
@@ -184,6 +224,8 @@ class XsensMtiImu:
         self._accel = None
         self._t = 0.0
         self._mount = MOUNT_QUAT / np.linalg.norm(MOUNT_QUAT)
+        self.stats = {"n_quat": 0, "n_gyro": 0, "n_accel": 0,
+                      "bad_quat": 0, "coord": -1, "t0": time.monotonic()}
         if configure:
             self._configure()
         self._running = True
@@ -213,6 +255,9 @@ class XsensMtiImu:
         send(MID_GOTO_MEASUREMENT)
         self.ser.reset_input_buffer()
 
+    # NED -> z-up: rotate the world side 180 deg about x (N,E,D)->(N,W,U).
+    _Q_X180 = np.array([0.0, 1.0, 0.0, 0.0])
+
     def _reader(self):
         while self._running:
             try:
@@ -226,13 +271,24 @@ class XsensMtiImu:
                 if mid != MID_MTDATA2:
                     continue
                 fields = parse_mtdata2(payload)
+                quat = fields.get("quat")
+                if quat is not None:
+                    self.stats["coord"] = fields.get("coord", 0)
+                    if abs(np.linalg.norm(quat) - 1.0) > 0.02:
+                        self.stats["bad_quat"] += 1
+                        quat = None
+                    elif fields.get("coord") == 1:  # NED
+                        quat = _quat_mul(self._Q_X180, quat)
                 with self._lock:
-                    if "quat" in fields:
-                        self._quat = fields["quat"]
+                    if quat is not None:
+                        self._quat = quat
+                        self.stats["n_quat"] += 1
                     if "gyro" in fields:
                         self._gyro = fields["gyro"]
+                        self.stats["n_gyro"] += 1
                     if "accel" in fields:
                         self._accel = fields["accel"]
+                        self.stats["n_accel"] += 1
                     if fields:
                         self._t = time.monotonic()
 
