@@ -293,7 +293,7 @@ class XsensMtiImu:
                 if data and self.ser.in_waiting:
                     data += self.ser.read(self.ser.in_waiting)
             except (OSError, serial.SerialException):
-                time.sleep(0.1)
+                time.sleep(0.12)  # not 0.1: the fastsleep shim clamps exact-100ms sleeps
                 continue
             if not data:
                 continue
