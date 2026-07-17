@@ -147,7 +147,9 @@ same protocol if you prefer a terminal.
 
 - Command path: identical to `pineapple_rl_deploy` — 500 Hz `LowCmd_` DDS
   → DAMIAO MIT mode. Emit exactly the suite-verified fields: kp
-  [40,25,25,0]·2, kd [1,.5,.5,**1.5**]·2 (within DAMIAO packet ranges
+  [**70**,25,25,0]·2 (hip_aa raised +30 over the design value — hardware-
+  validated fix for hip-stiction roll listing, same emit-only structure as
+  the wheel kd), kd [1,.5,.5,**1.5**]·2 (within DAMIAO packet ranges
   kp ∈ [0,500], kd ∈ [0,5]), tau from the controller.
 - The stance ramp-up ("stand" mode) and sit sequencing should be reused
   from the deploy stack; this repo only implements the balancing mode.
