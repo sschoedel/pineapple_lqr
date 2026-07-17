@@ -217,6 +217,12 @@ class TableController:
             "wheel_gain": 1.0,
             "vx_gain": 1.0,
             "vi_gain": 1.0,
+            # scale on the roll-integrator authority (Ki roll column).
+            # 0 disables it — diagnostic for the listing-over-time issue;
+            # note the integrator STATE still accumulates toward its clamp
+            # while disabled, so re-arm balance after moving this knob
+            # rather than raising it mid-run.
+            "ri_gain": 1.0,
             # emitted hip kp above the design value: pure added stance
             # stiffness at the board rate (fights hip stiction creep /
             # track-width wander). 0 = sim-verified default.
@@ -246,6 +252,7 @@ class TableController:
         dx = self._idx["dx"]
         K[:, dx] *= tn["vx_gain"]
         Ki[:, 0] *= tn["vi_gain"]
+        Ki[:, 2] *= tn["ri_gain"]   # integrator order: [vx, yaw, roll]
         self._K_eff = K
         self._Ki_eff = Ki
         kd = self.t["kd_emit"].astype(float).copy()
