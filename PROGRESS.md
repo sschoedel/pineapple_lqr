@@ -356,3 +356,77 @@ friction} cases (they were the blind spot of the original suite).
   for the scrub-friction steady-state error instead (see plan above).
 - Push body is `base_link` (fixed in simulate.run, iter 2).
 - Action latency semantics: physics-step timestamped queue (fixed iter 2).
+
+## Get-up-from-ground / go-to-ground (2026-07-17, session with Sam)
+
+Goal: TVLQR tracking a sit->stand interpolation (Sam's spec: simple joint
+interpolation, Riccati gains at each step, terminal = standing gains).
+
+### What works (sim-verified, `lqr/getup.py`)
+- **Sit pose physics**: settled SIT_ANGLES rests on wheels + rear support
+  geoms (geom25/32), base z=0.022, COM 3.8 cm behind the wheel contact.
+  Naive position-ramp standup flips the robot backward (rolls to
+  pitch -1.3, roll pi) — active balance through the rise is mandatory.
+- **Per-knot quasi-static tables** (the trajectory analog of
+  find_equilibrium): balance pitch theta(s) (COM-over-contact bisection;
+  no solution below s=0.1 — deep fold), equilibrium height (base-fz
+  bisection; +-1 mm penetration swings joint inverse-dynamics torques by
+  +-50 Nm, exactness matters), static joint feedforward u_ff(s); below
+  the first balanced knot, ff blends from settled-sit inverse dynamics.
+- **Nominal rollout** at the REAL 100 Hz command rate (feedforward held,
+  board PD per physics step): joint servo along the path + u_ff(s) +
+  segway wheel loop A*pitch+B*dpitch+C*vx+D*clamp(ivx), (40,6,16,6),
+  faded out below s=0.25 (statically supported there). Gets up in 5 s,
+  ends z=0.375 pitch +0.10 speed 0.33 — **captured by the stance balance
+  LQR** (with IMU accel fed — the complementary filter is useless without
+  it; capture tests that omit accel_x fail spuriously). Reverse rollout
+  (4 s) settles onto the supports at z=0.022. Both directions verified.
+- Balance-LQR capture basin probes: yaw/wheel-angle/x invariance exact;
+  rolling starts to 0.3 m/s captured (accel fed).
+
+### What failed: time-locked TVLQR playback
+Riccati gains along the recorded trajectory destabilize playback even
+with ORACLE state feedback (estimator removed). Bugs found and fixed on
+the way (all real, none sufficient):
+1. **Knot-index float truncation**: accumulated t = 6*0.025 sits ulp
+   below the boundary; int(t/dt) lagged the whole schedule one knot — a
+   systematic 25 ms feedforward delay. Fix: round-to-nearest.
+2. **tau_ff clipped at EFFORT_LIMIT corrupted the replay**: the
+   compensation of board damping at wheel speed >10 rad/s legitimately
+   exceeds the wheel's 11 Nm effort limit; clip at the DAMIAO MIT-packet
+   range instead (hip 28 / thigh 28 / knee 120 / wheel 20 Nm).
+3. **Board-PD closure**: playback emits kp/kd the board applies between
+   ticks; the Riccati must design around A_closed = A - B*Kb or the
+   emitted gains fight the schedule (KP_EMIT hips +30 and KD_EMIT wheel
+   1.5 toward dq_ref were both measurably destabilizing).
+4. **Rate consistency**: PHYSICS_DT is 5 ms (model.py comment says
+   "500 Hz" — wrong, it is 200 Hz); knots must be 10 ms (DECIM=2).
+   The 500 Hz-tuned segway loop runs away backward at 100 Hz (vx -2.2,
+   wheels -23 rad/s into the torque-speed clip); re-swept at 100 Hz.
+With all fixes: K=0 pure replay tracks the nominal bit-exactly for
+~2.9 s (>half), then diverges benignly. But ANY Riccati K tried
+(composed-window 10 ms, per-step 5 ms, support-phase fade, spike clamp
++-350) chatters the joints (dq errors 10-20 rad/s, saturation) and drops
+the robot around the support->wheel contact transition. |K| profiles:
+healthy ~120-290 (stance-like) in the pure wheel-balance phase, 3000-9000
+spikes through contact transitions — mjd_transitionFD through sticking /
+lifting contacts is noise, and backward Riccati both amplifies it and
+bakes time-locked wheel-speed/scoot tracking into the gains (the least
+repeatable part of the maneuver).
+
+### Paths forward (Sam to pick)
+A. **Ship the working schedule controller**: time-indexed q_ref(s(t)) +
+   per-knot equilibrium feedforward + segway-structured wheel feedback
+   (state-based, no nominal-locking). Works robustly in sim today; is
+   honestly "time-varying reference + feedforward", NOT full TVLQR gain
+   matrices.
+B. **Gain-scheduled LQR over the quasi-static ridge** (closest sound
+   realization of the TVLQR intent): DARE at each knot's STATIC
+   equilibrium (theta_bal(s), clean settled contact — the same
+   linearization recipe the proven stance LQR uses), schedule K(s) along
+   a slow ramp that tracks the balance-pitch ridge (robot pitches nose
+   -down ~0.8 rad onto its wheels at the deep-fold end, then rises
+   level). No dynamic-trajectory FD, no time-locked u_ref; each knot is
+   an infinite-horizon stabilizer. More synthesis work, and the maneuver
+   LOOKS different (nose-down crouch) but every point is statically
+   balanced.
