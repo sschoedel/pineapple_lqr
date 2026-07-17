@@ -356,7 +356,7 @@ class RobotRuntime:
     """Mode logic + safety trips around TableController (mirror of
     pineapple_lqr's deploy_lqr.LqrRuntime, without mujoco/DDS)."""
 
-    MODES = ("damp", "stand", "balance", "sit")
+    MODES = ("damp", "stand", "balance", "sit", "policy")
     SIT_ANGLES = np.array([0.093, 1.49, -3.14, 0.0, 0.093, 1.49, -3.14, 0.0])
     STAND_SECONDS = 3.0
     STAND_KP = 40.0
@@ -367,6 +367,7 @@ class RobotRuntime:
 
     def __init__(self, ctrl: TableController, dt: float):
         self.ctrl = ctrl
+        self.policy = None  # optional PolicyController (policy_runtime.py)
         self.dt = dt
         self.mode = "damp"
         self._mode_t = 0.0
@@ -386,6 +387,9 @@ class RobotRuntime:
         self._mode_start_q = snap.q.copy()
         if mode == "balance":
             self.ctrl.reset()
+        if mode == "policy":
+            assert self.policy is not None, "no policy loaded"
+            self.policy.reset()
         self.tripped = False
         self.trip_reason = None
         if mode != "balance":
@@ -448,6 +452,16 @@ class RobotRuntime:
             else:
                 v, w = self.ctrl.slew(self.v_cmd, self.w_cmd, self.dt)
                 self._last_cmd = self.ctrl.mit_command(snap, v, w, dt=self.dt)
+        elif self.mode == "policy":
+            roll, pitch = tilt_from_quat(snap.quat)
+            if max(abs(roll), abs(pitch)) > self.TRIP_TILT:
+                self.trip("TILT LIMIT EXCEEDED")
+            else:
+                # the policy applies its own command limits (diamond
+                # constraint, trained ranges) — no slew, matching the RL
+                # deploy stack
+                self._last_cmd = self.policy.mit_command(
+                    snap, self.v_cmd, self.w_cmd)
         return self._last_cmd
 
     def telemetry(self) -> dict:
