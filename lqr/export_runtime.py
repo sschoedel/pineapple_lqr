@@ -62,6 +62,9 @@ def export(path: str = "lqr_tables.npz") -> dict:
         gov_w_translate=c.GOV_W_TRANSLATE,
         gov_vw_max=c.GOV_VW_MAX,
     )
+    from lqr.getup import schedule_tables
+
+    tables.update(schedule_tables(rm))
     np.savez(path, **tables)
     print(f"wrote {path}: K{c.K.shape}, {len(c.labels)} states")
     return tables

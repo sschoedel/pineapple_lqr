@@ -495,3 +495,23 @@ if __name__ == "__main__":
     path = sys.argv[1] if len(sys.argv) > 1 else "getup_tables.npz"
     np.savez(path, **tables)
     print(f"wrote {path}")
+
+def schedule_tables(rm: RobotModel | None = None) -> dict:
+    """Tables for the SHIPPED schedule controller (option 1, 2026-07-17):
+    per-knot equilibrium feedforward + path constants + wheel-loop gains.
+    The TVLQR synthesis above is kept for reference; see PROGRESS.md."""
+    from lqr.model import build_model
+    rm = rm or build_model()
+    kt = build_knot_tables(rm)
+    return dict(
+        getup_s_grid=kt.s_grid,
+        getup_uff=kt.u_ff,
+        getup_sit=SIT_ANGLES,
+        getup_t_rise=T_RISE,
+        getup_t_down=T_DOWN,
+        getup_kp=KP_SERVO,
+        getup_kd=KD_BOARD,
+        getup_wheel_loop=np.array([WHEEL_LOOP[k] for k in "ABCD"]),
+        getup_fade_s=0.25,
+        getup_ivx_clamp=0.5,
+    )

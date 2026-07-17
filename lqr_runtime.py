@@ -363,11 +363,100 @@ class TableController:
         return MitCommand(q=q_cmd, dq=dq_cmd, kp=kp, kd=kd, tau=tau)
 
 
+class GetupController:
+    """Get-up-from-ground / go-to-ground schedule (numpy-only mirror of
+    lqr/getup.py's verified nominal controller; PROGRESS.md 2026-07-17).
+
+    Legs servo along the sit<->stance interpolation with per-knot static
+    equilibrium feedforward; wheels run a segway loop on current pitch /
+    pitch-rate / vx (state-structured — no time-locked nominal), faded to
+    pure damping while the robot rests on its supports (s < fade_s).
+    vx comes from the TableController's complementary estimator.
+    """
+
+    def __init__(self, ctrl: "TableController", direction: str):
+        assert direction in ("up", "down")
+        t = ctrl.t
+        self.ctrl = ctrl
+        self.direction = direction
+        self.s_grid = t["getup_s_grid"]
+        self.uff = t["getup_uff"]
+        self.sit = t["getup_sit"]
+        self.T = float(t["getup_t_rise"] if direction == "up"
+                       else t["getup_t_down"])
+        self.kp = t["getup_kp"].astype(float)
+        self.kd = t["getup_kd"].astype(float)
+        self.wl = t["getup_wheel_loop"].astype(float)  # A,B,C,D
+        self.fade_s = float(t["getup_fade_s"])
+        self.ivx_clamp = float(t["getup_ivx_clamp"])
+        self.wheel_r = float(t["wheel_radius"])
+        # roll stabilization: the schedule has no lateral feedback of its
+        # own (verified: the robot rolls off sideways mid-maneuver), so
+        # borrow the balance LQR's roll / roll-rate columns for the legs
+        # (they act mostly through hip_aa). Wheel rows zeroed — the segway
+        # loop owns the wheels.
+        self.k_roll = ctrl.K[:, ctrl._idx["roll"]].copy()
+        self.k_droll = ctrl.K[:, ctrl._idx["droll"]].copy()
+        self.k_roll[WHEEL_IDX] = 0.0
+        self.k_droll[WHEEL_IDX] = 0.0
+        self.t_now = 0.0
+        self.ivx = 0.0
+        self.vxf = 0.0
+        self.s = 0.0 if direction == "up" else 1.0
+
+    @property
+    def done(self) -> bool:
+        return self.t_now >= self.T
+
+    def mit_command(self, snap: Snapshot, dt: float) -> MitCommand:
+        a = 0.5 - 0.5 * np.cos(np.pi * min(self.t_now, self.T) / self.T)
+        self.s = a if self.direction == "up" else 1.0 - a
+        self.t_now += dt
+        q_ref = self.s * self.ctrl.stance + (1.0 - self.s) * self.sit
+        ff = np.array([np.interp(self.s, self.s_grid, self.uff[:, j])
+                       for j in range(8)])
+        # vx from wheel-speed odometry only (lightly low-passed): the
+        # full stance-frozen odometry rows misread the fast-moving folded
+        # legs as phantom base velocity mid-rise (verified: the wheel loop
+        # fighting it rolled the robot over at s~0.2), while wheel-speed *
+        # radius is crouch-independent under rolling contact.
+        vx_raw = self.wheel_r * 0.5 * (snap.dq[3] + snap.dq[7])
+        self.vxf += 0.6 * (vx_raw - self.vxf)
+        vx = self.vxf
+        roll, pitch = tilt_from_quat(snap.quat)
+        dpitch = snap.gyro[1]
+        droll = snap.gyro[0]
+        self.ivx = float(np.clip(self.ivx + vx * dt,
+                                 -self.ivx_clamp, self.ivx_clamp))
+        A, B, C, D = self.wl
+        seg = A * pitch + B * dpitch + C * vx + D * self.ivx
+        blend = float(np.clip(self.s / self.fade_s, 0.0, 1.0))
+        # roll feedback fades in with s: at deep fold the rear supports
+        # give lateral stability for free, and the stance-geometry roll
+        # gains are wrong for folded hips
+        # getup fades roll feedback in later: blending it in right at
+        # support liftoff kicked the pitch plane while still marginal
+        rb = (np.clip((self.s - 0.2) / 0.3, 0.0, 1.0)
+              if self.direction == "up" else blend)
+        tau = ff - rb * (self.k_roll * roll + self.k_droll * droll)
+        tau[WHEEL_IDX] = blend * seg
+        kp = self.kp.copy()
+        kp[WHEEL_IDX] = 0.0
+        return MitCommand(q=q_ref, dq=np.zeros(8), kp=kp,
+                          kd=self.kd.astype(float).copy(),
+                          tau=np.clip(tau, -TAU_PACKET, TAU_PACKET))
+
+
+# DAMIAO MIT-packet tau ranges (hip J4340P / thigh J4340 28, knee J6248P
+# 120, wheel J6006 20 Nm) — the wire limit, not the physical effort limit
+TAU_PACKET = np.array([28.0, 28.0, 120.0, 20.0] * 2)
+
+
 class RobotRuntime:
     """Mode logic + safety trips around TableController (mirror of
     pineapple_lqr's deploy_lqr.LqrRuntime, without mujoco/DDS)."""
 
-    MODES = ("damp", "stand", "balance", "sit", "policy")
+    MODES = ("damp", "stand", "balance", "sit", "policy", "getup", "getdown")
     # nominal base-height command (policy mode only; LQR ignores it). Kept
     # here so height resets never zero — 0 m is not a safe height command.
     H_NOMINAL = 0.38
@@ -382,6 +471,7 @@ class RobotRuntime:
     def __init__(self, ctrl: TableController, dt: float):
         self.ctrl = ctrl
         self.policy = None  # optional PolicyController (policy_runtime.py)
+        self.getup = None   # active GetupController while in getup/getdown
         self.dt = dt
         self.mode = "damp"
         self._mode_t = 0.0
@@ -405,6 +495,10 @@ class RobotRuntime:
         if mode == "policy":
             assert self.policy is not None, "no policy loaded"
             self.policy.reset()
+        if mode in ("getup", "getdown"):
+            self.ctrl.reset()  # fresh vx estimator for the wheel loop
+            self.getup = GetupController(
+                self.ctrl, "up" if mode == "getup" else "down")
         self.tripped = False
         self.trip_reason = None
         if mode != "balance":
@@ -473,6 +567,17 @@ class RobotRuntime:
             else:
                 v, w = self.ctrl.slew(self.v_cmd, self.w_cmd, self.dt)
                 self._last_cmd = self.ctrl.mit_command(snap, v, w, dt=self.dt)
+        elif self.mode in ("getup", "getdown"):
+            roll, pitch = tilt_from_quat(snap.quat)
+            # tighter roll trip than balance (no lateral authority while
+            # rising); pitch excursions are part of the maneuver
+            if abs(roll) > 0.5 or abs(pitch) > 0.9:
+                self.trip("TILT LIMIT EXCEEDED (getup)")
+            else:
+                self._last_cmd = self.getup.mit_command(snap, self.dt)
+                if self.getup.done and self.mode == "getup":
+                    # hold standing servo; operator arms balance/policy
+                    pass
         elif self.mode == "policy":
             roll, pitch = tilt_from_quat(snap.quat)
             if max(abs(roll), abs(pitch)) > self.TRIP_TILT:
