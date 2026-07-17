@@ -31,6 +31,7 @@ from lqr.model import (
     BOARD_KP,
     KD_DESIGN,
     KD_EMIT,
+    KP_EMIT,
     KD_RANGE,
     KP_RANGE,
     PHYSICS_DT,
@@ -184,7 +185,7 @@ class LqrController:
         for j in range(8):
             pc, vc = self._own_pos_col[j], self._own_vel_col[j]
             if pc >= 0:
-                Kb[j, pc] = BOARD_KP[j]
+                Kb[j, pc] = KP_EMIT[j]
             if vc >= 0:
                 Kb[j, vc] = KD_EMIT[j]
         self._Kb = Kb
@@ -440,7 +441,7 @@ class LqrController:
         never subtracted and acts as zero-delay damping at the 500 Hz board
         rate — this is what buys 20-30 ms loop-delay tolerance in the
         balance/velocity regimes (see lqr.model)."""
-        kp = np.clip(BOARD_KP, *KP_RANGE)
+        kp = np.clip(KP_EMIT, *KP_RANGE)
         kd = np.clip(KD_EMIT, *KD_RANGE)
         q_cmd = STANCE_JOINT_POS.copy()
         dq_cmd = np.zeros(8)

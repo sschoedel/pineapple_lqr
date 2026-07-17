@@ -258,7 +258,11 @@ class TableController:
         kd = self.t["kd_emit"].astype(float).copy()
         kd[3] = kd[7] = tn["wheel_kd"]
         self._kd_emit_eff = kd
-        kp = self.t["board_kp"].astype(float).copy()
+        # emit base: kp_emit (hip_aa raised 40->70, hardware-validated fix
+        # for the hip-creep roll list); board_kp fallback for old tables.
+        # hip_kp_extra rides on TOP of the baked-in +30.
+        base = self.t["kp_emit"] if "kp_emit" in self.t else self.t["board_kp"]
+        kp = base.astype(float).copy()
         kp[0] += tn["hip_kp_extra"]
         kp[4] += tn["hip_kp_extra"]
         self._kp_emit_eff = kp
@@ -364,12 +368,15 @@ class RobotRuntime:
     pineapple_lqr's deploy_lqr.LqrRuntime, without mujoco/DDS)."""
 
     MODES = ("damp", "stand", "balance", "sit", "policy")
+    # nominal base-height command (policy mode only; LQR ignores it). Kept
+    # here so height resets never zero — 0 m is not a safe height command.
+    H_NOMINAL = 0.38
     SIT_ANGLES = np.array([0.093, 1.49, -3.14, 0.0, 0.093, 1.49, -3.14, 0.0])
     STAND_SECONDS = 3.0
     STAND_KP = 40.0
     STAND_KD = 1.0
     DAMP_KD = 1.0
-    TRIP_TILT = 0.5
+    TRIP_TILT = 1.0
     DEADMAN_TIMEOUT = 0.5
 
     def __init__(self, ctrl: TableController, dt: float):
@@ -382,6 +389,7 @@ class RobotRuntime:
         self._last_cmd = self.damp_cmd()
         self.v_cmd = 0.0
         self.w_cmd = 0.0
+        self.h_cmd = self.H_NOMINAL
         self.tripped = False
         self.trip_reason: str | None = None
         self._deadman_armed = False
@@ -402,10 +410,15 @@ class RobotRuntime:
         if mode != "balance":
             self.v_cmd = 0.0
             self.w_cmd = 0.0
+        self.h_cmd = self.H_NOMINAL
 
-    def set_command(self, v, w, v_max=1.0, w_max=2.0):
+    def set_command(self, v, w, v_max=1.0, w_max=2.0, h=None):
         self.v_cmd = float(np.clip(v, -v_max, v_max))
         self.w_cmd = float(np.clip(w, -w_max, w_max))
+        # height holds its last value unless explicitly commanded (policy
+        # mode); the policy runtime clips to its trained range
+        if h is not None:
+            self.h_cmd = float(h)
 
     def note_heartbeat(self, t_mono: float):
         self._last_heartbeat = t_mono
@@ -426,6 +439,7 @@ class RobotRuntime:
             self.trip_reason = reason
         self.v_cmd = 0.0
         self.w_cmd = 0.0
+        self.h_cmd = self.H_NOMINAL
         self._last_cmd = self.damp_cmd()
 
     def damp_cmd(self) -> MitCommand:
@@ -468,11 +482,12 @@ class RobotRuntime:
                 # constraint, trained ranges) — no slew, matching the RL
                 # deploy stack
                 self._last_cmd = self.policy.mit_command(
-                    snap, self.v_cmd, self.w_cmd)
+                    snap, self.v_cmd, self.w_cmd, self.h_cmd)
         return self._last_cmd
 
     def telemetry(self) -> dict:
         out = {"mode": self.mode, "v_cmd": self.v_cmd, "w_cmd": self.w_cmd,
+               "h_cmd": self.h_cmd,
                "tripped": self.tripped, "reason": self.trip_reason}
         x = getattr(self.ctrl, "last_x", None)
         if x is not None:

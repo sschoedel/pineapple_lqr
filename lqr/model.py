@@ -65,6 +65,14 @@ HW_KD = np.array([1.0, 0.5, 0.5, 0.3, 1.0, 0.5, 0.5, 0.3])
 BOARD_KP = HW_KP.copy()
 KD_DESIGN = HW_KD.copy()
 KD_EMIT = np.array([1.0, 0.5, 0.5, 1.5, 1.0, 0.5, 0.5, 1.5])
+# EMITTED hip_aa kp is raised 40 -> 70 (hardware-validated 2026-07-17):
+# hip stiction let the legs splay/creep under load, showing up as a
+# progressive roll list that eventually tipped the robot (the roll
+# integrator was ruled out by A/B with ri_gain=0). +30 Nm/rad of board-rate
+# hip stiffness fixed it on hardware. Same structure as KD_EMIT: NOT folded
+# into the DARE design nor subtracted from tau_ff — it rides on top as
+# zero-delay stance stiffness about the hip_aa setpoint.
+KP_EMIT = BOARD_KP + np.array([30.0, 0.0, 0.0, 0.0, 30.0, 0.0, 0.0, 0.0])
 
 # DAMIAO MIT-mode packet gain ranges.
 KP_RANGE = (0.0, 500.0)
